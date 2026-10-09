@@ -1,0 +1,302 @@
+{
+  "name": "Visual Bug-to-Ticket Generator - Groq Vision AI",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Visual Bug-to-Ticket Generator",
+        "formDescription": "Upload a screenshot of a website or application to identify visual bugs and generate a structured bug ticket.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Screenshot",
+              "fieldType": "file",
+              "multipleFiles": false,
+              "acceptFileTypes": ".png, .jpg, .jpeg",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Reporter Email",
+              "fieldType": "email",
+              "placeholder": "you@example.com",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Additional Notes",
+              "fieldType": "textarea",
+              "placeholder": "Describe what looks wrong, which page or device, etc. (optional)"
+            }
+          ]
+        },
+        "options": {
+          "buttonLabel": "Generate Bug Ticket"
+        }
+      },
+      "id": "e56d19f2-88a8-4796-b333-ed3ea01609e9",
+      "name": "Form Trigger",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -1232,
+        176
+      ],
+      "webhookId": "3cabf7cc-fe61-4c38-88b6-59dcaa43b192"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 2: validate the uploaded screenshot. Never throws; always returns a result.\nconst MAX_BYTES = 3000000; // ~3 MB raw -> ~4 MB Base64 (Groq's limit for Base64 images)\nconst item = $input.first();\nconst json = item.json || {};\nconst binary = item.binary || {};\nconst keys = Object.keys(binary);\nconst errors = [];\nlet filename = '';\nlet mime = '';\nlet size = 0;\nlet file = null;\n\nif (keys.length === 0) {\n  errors.push('No screenshot was uploaded. Please attach a PNG or JPG image.');\n} else {\n  const key = keys[0];\n  file = binary[key];\n  filename = file.fileName || 'screenshot';\n  try {\n    const buf = await this.helpers.getBinaryDataBuffer(0, key);\n    size = buf.length;\n    if (size === 0) {\n      errors.push('The uploaded file is empty (0 bytes).');\n    } else {\n      const isPng = size > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;\n      const isJpg = size > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;\n      if (isPng) mime = 'image/png';\n      else if (isJpg) mime = 'image/jpeg';\n      else errors.push('Unsupported file type. The file content is not a PNG or JPEG image (filename: ' + filename + ').');\n      if (size > MAX_BYTES) {\n        errors.push('Image is too large (' + (size / 1000000).toFixed(1) + ' MB). Please upload an image under 3 MB.');\n      }\n    }\n  } catch (e) {\n    errors.push('The uploaded file could not be read: ' + e.message);\n  }\n}\n\nconst valid = errors.length === 0;\nconst out = {\n  json: {\n    valid,\n    errors,\n    filename,\n    mime,\n    sizeBytes: size,\n    reporterEmail: String(json['Reporter Email'] || '').trim(),\n    notes: String(json['Additional Notes'] || '').trim(),\n  },\n};\nif (valid) out.binary = { screenshot: file }; // normalise the binary key name\nreturn [out];\n"
+      },
+      "id": "65a804cb-0259-47ca-a03b-7301433cf60e",
+      "name": "Validate Uploaded Screenshot",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -992,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "836a5d40-ba31-4121-9d0f-6799e3c64524",
+      "name": "Is Screenshot Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -752,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 3: prepare the prompt text. The image stays as binary field 'screenshot' and is read by the LLM Chain.\nconst SYSTEM_PROMPT = `You are an expert software QA engineer specializing in visual bug detection and UI testing.\n\nAnalyze the uploaded screenshot carefully.\n\nIdentify only bugs supported by visible evidence.\n\nLook for:\n- Misaligned elements\n- Overlapping components\n- Broken layouts\n- Incorrect spacing\n- Text overflow\n- Cut-off content\n- Missing images\n- Broken icons\n- Incorrect colors\n- Inconsistent fonts\n- Unreadable text\n- Responsive design problems visible in the screenshot\n- Other clearly visible UI defects\n\nDo not claim that buttons, links, APIs, or application functions are broken based on a screenshot alone.\nIf a functional issue cannot be verified from the image, mark it as \"Requires functional testing.\"\nIf no visual bug is visible, report that no obvious visual bug was detected.\nDo not invent errors.\nAnalyze the screenshot together with the user's additional notes.\n\nGenerate a professional bug ticket containing: bug title, description, category, severity, priority, steps to reproduce (only if supported by the available information), expected result, actual result, screenshot filename, reporter email, AI confidence, recommended fix.\n\nSEVERITY RULES:\nCritical: A clearly visible issue that prevents use of a major interface or makes essential information inaccessible.\nHigh: A major visual defect that significantly affects usability.\nMedium: A noticeable visual defect that affects presentation or usability.\nLow: A minor cosmetic issue.\nDo not assign Critical or High severity without sufficient evidence.\n\nPRIORITY RULES:\nP1: Urgent issue supported by the evidence.\nP2: Important issue.\nP3: Normal issue.\nP4: Minor cosmetic issue.\n\nIf the screenshot does not contain enough information, explain what cannot be determined in \"limitations\".\nIf no bug is visible, set \"bug_detected\" to false and use \"N/A\" for severity and priority.\n\nOUTPUT FORMAT: Return ONLY one valid JSON object (no markdown fences, no text before or after) with exactly these keys:\n{\n  \"bug_detected\": true,\n  \"bug_title\": \"\",\n  \"bug_description\": \"\",\n  \"bug_category\": \"\",\n  \"severity\": \"\",\n  \"priority\": \"\",\n  \"steps_to_reproduce\": [],\n  \"expected_result\": \"\",\n  \"actual_result\": \"\",\n  \"screenshot_filename\": \"\",\n  \"reporter_email\": \"\",\n  \"ai_confidence\": \"\",\n  \"recommended_fix\": \"\",\n  \"limitations\": []\n}`;\n\nconst item = $input.first();\nconst v = item.json;\n\nconst userText =\n  'Screenshot filename: ' + v.filename + '\\n' +\n  'Reporter email: ' + v.reporterEmail + '\\n' +\n  'Additional notes from the reporter: ' + (v.notes || '(none provided)') + '\\n\\n' +\n  'Analyze the attached screenshot and return the bug ticket JSON.';\n\nreturn [{\n  json: {\n    filename: v.filename,\n    reporterEmail: v.reporterEmail,\n    notes: v.notes,\n    mime: v.mime,\n    sizeBytes: v.sizeBytes,\n    systemPrompt: SYSTEM_PROMPT,\n    userText,\n  },\n  binary: item.binary, // the chain reads the image from the \"screenshot\" field\n}];\n"
+      },
+      "id": "95fe580d-99eb-46b2-84fa-cf484d8400f0",
+      "name": "Prepare Screenshot Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -512,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.userText }}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "={{ $json.systemPrompt }}"
+            },
+            {
+              "type": "HumanMessagePromptTemplate",
+              "messageType": "imageBinary",
+              "binaryImageDataKey": "screenshot"
+            }
+          ]
+        }
+      },
+      "id": "31f9a9c8-0a38-4567-a8b7-17aea255f4e4",
+      "name": "Groq Vision AI Analysis",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        -272,
+        80
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "model": "qwen/qwen3.8-27b",
+        "options": {
+          "maxTokensToSample": 4000,
+          "temperature": 0.2
+        }
+      },
+      "id": "a0621b56-61d5-4987-afa0-f21e77ad77ca",
+      "name": "Groq Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        -224,
+        288
+      ],
+      "credentials": {
+        "groqApi": {
+          "id": "O0Oe82z8fZnEQVWO",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 5: turn the Groq response (or any failure) into a readable ticket + HTML for the Form Ending page.\nconst prep = $('Prepare Screenshot Data').first().json;\nconst res = $input.first().json;\n\nconst esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst redact = (s) => String(s).replace(/gsk_[A-Za-z0-9]+/g, '[redacted]').replace(/Bearer\\s+\\S+/gi, 'Bearer [redacted]');\nconst BAR = '========================================';\n\nfunction fail(reason) {\n  const text = BAR + '\\nVISUAL BUG-TO-TICKET GENERATOR\\n' + BAR + '\\n\\nCould not generate a bug ticket.\\n\\nReason:\\n' + reason + '\\n\\n' + BAR;\n  return [{ json: { ok: false, title: 'Could not generate the bug ticket', ticketText: text,\n    ticketHtml: '<b>Could not generate the bug ticket.</b><br><br>' + esc(reason).replace(/\\n/g, '<br>') } }];\n}\n\n// 1) Error from the LLM chain / Groq\nif (res.error) {\n  const m = redact(typeof res.error === 'string' ? res.error : (res.error.message || JSON.stringify(res.error))).slice(0, 400);\n  let reason;\n  if (/401|invalid api key|unauthor/i.test(m)) reason = 'Authentication failed. The Groq API key is missing or invalid. Check the credential in n8n.';\n  else if (/429|rate limit/i.test(m)) reason = 'Groq rate limit reached. Wait a minute and try again.';\n  else if (/413|too large|payload/i.test(m)) reason = 'The image is too large for Groq. Upload a smaller image.';\n  else if (/404|model.*(not found|decommission|does not exist)/i.test(m)) reason = 'Model not found or retired. Check the model name in the Groq Chat Model node.';\n  else if (/ENOTFOUND|ECONN|ETIMEDOUT|fetch failed|network/i.test(m)) reason = 'Could not reach the Groq API (network error). Try again.';\n  else reason = 'The AI request failed: ' + m;\n  return fail(reason);\n}\n\n// 2) Read the model output\nlet content = res.text ?? res.output ?? res.response;\nif (Array.isArray(content)) content = content.map((p) => p.text || '').join('');\nif (typeof content !== 'string' || content.trim() === '') {\n  return fail('Groq returned an empty response. Please try again.');\n}\nlet cleaned = content.replace(/<think>[\\s\\S]*?<\\/think>/g, '').trim();\nconst first = cleaned.indexOf('{');\nconst last = cleaned.lastIndexOf('}');\nlet t;\ntry {\n  if (first === -1 || last <= first) throw new Error('no JSON object found');\n  t = JSON.parse(cleaned.slice(first, last + 1));\n} catch (e) {\n  return fail('The AI response was not valid JSON (' + e.message + '). Please try again.\\nResponse preview: ' + redact(cleaned).slice(0, 300));\n}\n\n// 4) Build the ticket\nconst asText = (x, d) => (x === undefined || x === null || String(x).trim() === '' ? d : String(x).trim());\nconst asList = (x) => (Array.isArray(x) ? x.map((s) => String(s)) : (x ? [String(x)] : []));\nconst detected = t.bug_detected !== false;\nconst sevOk = ['Critical', 'High', 'Medium', 'Low'];\nconst priOk = ['P1', 'P2', 'P3', 'P4'];\nconst severity = detected ? (sevOk.includes(t.severity) ? t.severity : 'Not specified') : 'N/A';\nconst priority = detected ? (priOk.includes(t.priority) ? t.priority : 'Not specified') : 'N/A';\nconst steps = asList(t.steps_to_reproduce);\nconst limits = asList(t.limitations);\n\nconst sections = [\n  ['Bug Title', asText(t.bug_title, detected ? 'Untitled visual bug' : 'No obvious visual bug detected')],\n  ['Bug Category', asText(t.bug_category, detected ? 'Not specified' : 'N/A')],\n  ['Severity', severity],\n  ['Priority', priority],\n  ['Description', asText(t.bug_description, detected ? 'Not provided' : 'No obvious visual defect was identified in this screenshot.')],\n  ['Steps to Reproduce', steps.length ? steps.map((s, i) => (i + 1) + '. ' + s).join('\\n') : 'Not enough information to determine steps from the screenshot alone.'],\n  ['Expected Result', asText(t.expected_result, 'Not specified')],\n  ['Actual Result', asText(t.actual_result, 'Not specified')],\n  ['Screenshot', prep.filename],            // always from the workflow, never from the AI\n  ['Reporter', prep.reporterEmail],         // always from the workflow, never from the AI\n  ['AI Confidence', asText(t.ai_confidence, 'Not specified')],\n  ['Recommended Fix', asText(t.recommended_fix, detected ? 'Not specified' : 'N/A')],\n  ['Limitations', limits.length ? limits.map((s) => '- ' + s).join('\\n') : 'None reported. Functional behaviour cannot be verified from a screenshot.'],\n];\n\nconst ticketText = BAR + '\\nVISUAL BUG-TO-TICKET GENERATOR\\n' + BAR + '\\n\\n' +\n  sections.map(([k, v]) => k + ':\\n' + v).join('\\n\\n') + '\\n\\n' + BAR;\nconst ticketHtml = sections.map(([k, v]) => '<b>' + esc(k) + '</b><br>' + esc(v).replace(/\\n/g, '<br>')).join('<br><br>');\n\nreturn [{ json: { ok: true, title: detected ? 'Bug ticket generated' : 'No obvious visual bug detected', ticketText, ticketHtml } }];\n"
+      },
+      "id": "68c52ec6-396b-4edd-b140-b73c22d9cd06",
+      "name": "Format Bug Ticket",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Screenshot rejected",
+        "completionMessage": "=     {{ $json.errors.join('<br>') + '<br><br>Please go back and submit the form again with a valid PNG or JPG image.' }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        -528,
+        272
+      ],
+      "id": "ecc031f0-9e55-4fb5-87bf-90dcd0671ad3",
+      "name": "Show Validation Error",
+      "webhookId": "e175e753-39e6-40d8-9fec-5e50ac2063cd"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "={{ $json.title }}",
+        "completionMessage": "={{ $json.ticketHtml }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        192,
+        80
+      ],
+      "id": "c60ef7ac-7079-45f2-9c1b-48e3cde0390c",
+      "name": "Display Final Result",
+      "webhookId": "68e1d7fd-121d-4360-a896-64bde02aad97"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Form Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Uploaded Screenshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Uploaded Screenshot": {
+      "main": [
+        [
+          {
+            "node": "Is Screenshot Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Screenshot Valid?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Screenshot Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Show Validation Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Screenshot Data": {
+      "main": [
+        [
+          {
+            "node": "Groq Vision AI Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Vision AI Analysis": {
+      "main": [
+        [
+          {
+            "node": "Format Bug Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Groq Vision AI Analysis",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Bug Ticket": {
+      "main": [
+        [
+          {
+            "node": "Display Final Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "7398a073-0692-489f-9555-5ab50aa74539",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f5839234535ff2d5f891fde1c19d48441f26a3ec5d33dc73d01db91552e82559"
+  },
+  "nodeGroups": [],
+  "id": "3j1uC3lkiUX3jMJv",
+  "tags": []
+}
